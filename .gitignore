@@ -19,7 +19,6 @@ go.work
 
 # Go workspace
 /bin/
-/pkg/
 
 # Dependency directories
 /vendor/
