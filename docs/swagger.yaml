@@ -1,0 +1,34 @@
+basePath: /api
+definitions:
+  model.Hello:
+    description: Hello
+    properties:
+      id:
+        type: integer
+      message:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: This is a hello service API documentation
+  title: Hello Service API
+  version: "1.0"
+paths:
+  /hello:
+    get:
+      consumes:
+      - application/json
+      description: Get Hello
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.Hello'
+      summary: Get Hello
+schemes:
+- http
+- https
+swagger: "2.0"
