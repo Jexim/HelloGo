@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/viper"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
@@ -20,9 +22,11 @@ import (
 	_ "github.com/Jexim/HelloGo/docs"
 	mainMigration "github.com/Jexim/HelloGo/internal/repository/main/migrations"
 	"github.com/Jexim/HelloGo/internal/rest"
+	"github.com/Jexim/HelloGo/internal/rest/middleware"
 	"github.com/Jexim/HelloGo/internal/svc/hello"
 	"github.com/Jexim/HelloGo/pkg/config"
 	"github.com/Jexim/HelloGo/pkg/logger"
+	"github.com/Jexim/HelloGo/pkg/sentry"
 )
 
 // @title Hello Service API
@@ -39,64 +43,26 @@ func main() {
 	log := logger.New(viper.New())
 	defer log.Sync()
 
+	// Initialize Sentry
+	if err := sentry.Init(cfg.Sentry.DSN, log); err != nil {
+		log.Fatal("failed to initialize sentry", zap.Error(err))
+	}
+	defer sentry.Flush(2 * time.Second)
+
 	// Create context that will be canceled on system interrupt
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Setup DB with retry logic
-	var db *gorm.DB
-	var err error
-	for i := 0; i < 5; i++ {
-		db, err = gorm.Open(postgres.Open(cfg.Database.URI), &gorm.Config{})
-		if err == nil {
-			break
-		}
-		log.Warn("failed to connect to database, retrying...", zap.Error(err))
-		time.Sleep(time.Second * 2)
-	}
+	db, err := setupDatabase(cfg.Database.URI, log)
 	if err != nil {
-		log.Fatal("failed to connect to database after retries", zap.Error(err))
+		log.Fatal("failed to setup database", zap.Error(err))
 	}
 
-	// Automigrate
-	if err := mainMigration.Migrate(db); err != nil {
-		log.Fatal("Migration failed", zap.Error(err))
-	}
-
-	mux := chi.NewRouter()
-
-	// CORS middleware
-	corsMiddleware := cors.New(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	})
-	mux.Use(corsMiddleware.Handler)
-
-	// Swagger documentation
-	mux.Get("/swagger/*", httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"),
-	))
-
-	_, err = rest.New(rest.InitArgs{
-		Logger: log,
-	}, rest.ArgsREST{
-		Hello: hello.NewREST(mux, "/api/hello", hello.NewUsecase(hello.NewDatastore(db))),
-	})
+	// Setup HTTP server
+	server, err := setupServer(cfg, db, log)
 	if err != nil {
-		log.Fatal("failed to create main REST", zap.Error(err))
-	}
-
-	// Create server with timeouts
-	server := &http.Server{
-		Addr:         cfg.Server.Address,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		log.Fatal("failed to setup server", zap.Error(err))
 	}
 
 	// Start server in a goroutine
@@ -121,4 +87,79 @@ func main() {
 	}
 
 	log.Info("server stopped")
+}
+
+func setupDatabase(dsn string, log *zap.Logger) (*gorm.DB, error) {
+	var db *gorm.DB
+	var err error
+
+	for i := 0; i < 5; i++ {
+		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		if err == nil {
+			break
+		}
+		log.Warn("failed to connect to database, retrying...", zap.Error(err))
+		time.Sleep(time.Second * 2)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database after retries: %w", err)
+	}
+
+	// Automigrate
+	if err := mainMigration.Migrate(db); err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+
+	return db, nil
+}
+
+func setupServer(cfg *config.Config, db *gorm.DB, log *zap.Logger) (*http.Server, error) {
+	mux := chi.NewRouter()
+
+	// Middleware setup
+	mux.Use(cors.New(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Trace-ID"},
+		ExposedHeaders:   []string{"Link", "X-Trace-ID"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}).Handler)
+
+	// Add trace ID middleware
+	mux.Use(middleware.TraceID(log))
+
+	// Metrics middleware
+	mux.Use(middleware.Metrics)
+
+	// Swagger documentation
+	mux.Get("/swagger/*", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+	))
+
+	// Metrics endpoint
+	if cfg.Metrics.Enabled {
+		mux.Handle(cfg.Metrics.Path, promhttp.Handler())
+	}
+
+	// Setup REST handlers
+	_, err := rest.New(rest.InitArgs{
+		Logger: log,
+		DB:     db,
+		Router: mux,
+	}, rest.ArgsREST{
+		Hello: hello.NewREST(mux, "/api/hello", hello.NewUsecase(hello.NewDatastore(db))),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create main REST: %w", err)
+	}
+
+	// Create server with timeouts
+	return &http.Server{
+		Addr:         cfg.Server.Address,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}, nil
 }

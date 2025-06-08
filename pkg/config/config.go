@@ -7,15 +7,28 @@ import (
 )
 
 type Config struct {
-	Server struct {
-		Address string
-	}
-	Database struct {
-		URI string
-	}
-	Logger struct {
-		Level string
-	}
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+	Sentry   SentryConfig   `mapstructure:"sentry"`
+	Metrics  MetricsConfig  `mapstructure:"metrics"`
+}
+
+type ServerConfig struct {
+	Address string `mapstructure:"address"`
+}
+
+type DatabaseConfig struct {
+	URI string `mapstructure:"uri"`
+}
+
+type SentryConfig struct {
+	DSN         string `mapstructure:"dsn"`
+	Environment string `mapstructure:"environment"`
+}
+
+type MetricsConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Path    string `mapstructure:"path"`
 }
 
 func Load() *Config {
@@ -28,12 +41,15 @@ func Load() *Config {
 	viper.AutomaticEnv()
 
 	// Defaults
-	viper.SetDefault("server.address", ":3000")
-	viper.SetDefault("logger.level", "info")
+	viper.SetDefault("server.address", ":8080")
+	viper.SetDefault("sentry.environment", "development")
+	viper.SetDefault("metrics.enabled", true)
+	viper.SetDefault("metrics.path", "/metrics")
 
-	cfg := &Config{}
-	cfg.Server.Address = viper.GetString("server.address")
-	cfg.Database.URI = viper.GetString("database.uri")
-	cfg.Logger.Level = viper.GetString("logger.level")
-	return cfg
+	var config Config
+	if err := viper.Unmarshal(&config); err != nil {
+		panic(err)
+	}
+
+	return &config
 }
