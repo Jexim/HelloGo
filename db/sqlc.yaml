@@ -1,0 +1,16 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema:
+      - "../internal/modules/hello/repo/sqlc/schema/*.sql"
+    queries:
+      - "../internal/modules/hello/repo/sqlc/queries/*.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "../internal/modules/hello/repo/sqlc/gen"
+        sql_package: "database/sql"
+        emit_json_tags: true
+        emit_pointers_for_null_types: true
+        emit_interface: false
+
